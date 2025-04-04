@@ -75,7 +75,7 @@ func (e *Executor) Execute(ctx context.Context, event models.Event, actionCfg mo
 	if len(paramErrors) > 0 {
 		errMsg := "missing required parameters: " + strings.Join(paramErrors, ", ")
 		l.Error("Parameter preparation failed", "error", errMsg)
-		return "", "", fmt.Errorf(errMsg)
+		return "", "", fmt.Errorf("%s", errMsg)
 	}
 
 	l.Debug("Final parameters prepared (with event context)", "params", finalParams) // Be cautious logging parameters

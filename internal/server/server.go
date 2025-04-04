@@ -1,0 +1,170 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"sync"
+	"time"
+
+	// Needed for config access
+	"github.com/pbaity/lex/internal/logger"
+	"github.com/pbaity/lex/internal/queue" // Needed for trigger endpoint
+	"github.com/pbaity/lex/pkg/models"
+	// "github.com/pbaity/lex/internal/behavior/listener" // Will be needed later
+)
+
+// HTTPServer manages the shared HTTP server for listeners and IPC.
+type HTTPServer struct {
+	config     *models.Config
+	eventQueue *queue.EventQueue
+	// configReloader func() error // Callback to trigger config reload
+	server *http.Server
+	mux    *http.ServeMux
+	wg     sync.WaitGroup
+}
+
+// NewHTTPServer creates a new shared HTTP server instance.
+func NewHTTPServer(cfg *models.Config, eq *queue.EventQueue /*, reloader func() error*/) *HTTPServer {
+	mux := http.NewServeMux()
+	// TODO: Make address configurable via cfg.Application settings
+	addr := ":8080"
+	log := logger.L()
+	log.Info("Configuring HTTP server", "address", addr)
+
+	srv := &HTTPServer{
+		config:     cfg,
+		eventQueue: eq,
+		// configReloader: reloader,
+		mux: mux,
+		server: &http.Server{
+			Addr:         addr,
+			Handler:      mux,
+			ReadTimeout:  10 * time.Second, // Example timeouts
+			WriteTimeout: 10 * time.Second,
+			IdleTimeout:  60 * time.Second,
+		},
+	}
+	srv.registerInternalHandlers()
+	return srv
+}
+
+// Mux returns the underlying ServeMux so other services (like listener) can register handlers.
+func (s *HTTPServer) Mux() *http.ServeMux {
+	return s.mux
+}
+
+// Start launches the HTTP server in a goroutine.
+func (s *HTTPServer) Start() {
+	log := logger.L()
+	log.Info("Starting shared HTTP server...")
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		log.Info("Shared HTTP server listening", "address", s.server.Addr)
+		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("Shared HTTP server ListenAndServe error", "error", err)
+			// Consider more robust error handling/propagation
+		}
+		log.Info("Shared HTTP server stopped listening")
+	}()
+}
+
+// Stop gracefully shuts down the HTTP server.
+func (s *HTTPServer) Stop(ctx context.Context) error {
+	log := logger.L()
+	log.Info("Stopping shared HTTP server...")
+	err := s.server.Shutdown(ctx)
+	s.wg.Wait() // Wait for the ListenAndServe goroutine to finish
+	if err != nil {
+		log.Error("Shared HTTP server shutdown error", "error", err)
+		return fmt.Errorf("http server shutdown failed: %w", err)
+	}
+	log.Info("Shared HTTP server stopped successfully")
+	return nil
+}
+
+// registerInternalHandlers sets up routes for IPC commands.
+func (s *HTTPServer) registerInternalHandlers() {
+	log := logger.L()
+	// TODO: Secure these endpoints (e.g., localhost only binding, internal token?)
+	s.mux.HandleFunc("/lex/reload", s.handleReload)
+	s.mux.HandleFunc("/lex/trigger", s.handleTrigger)
+	log.Info("Registered internal HTTP handlers", "routes", []string{"/lex/reload", "/lex/trigger"})
+}
+
+// handleReload handles requests to the /lex/reload endpoint.
+func (s *HTTPServer) handleReload(w http.ResponseWriter, r *http.Request) {
+	log := logger.L().With("remote_addr", r.RemoteAddr)
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	log.Info("Received reload request via HTTP API")
+
+	// TODO: Implement actual config reload logic.
+	// This likely involves:
+	// 1. Calling a function passed during initialization (s.configReloader).
+	// 2. That function would:
+	//    - Load the new config.
+	//    - Validate it.
+	//    - Diff it with the old config.
+	//    - Stop/update/start services (listeners, watchers, timers) as needed.
+	//    - This is complex!
+
+	// Placeholder response
+	fmt.Fprintln(w, "Reload request received (implementation pending).")
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// handleTrigger handles requests to the /lex/trigger endpoint.
+func (s *HTTPServer) handleTrigger(w http.ResponseWriter, r *http.Request) {
+	log := logger.L().With("remote_addr", r.RemoteAddr)
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	log.Info("Received trigger request via HTTP API")
+
+	// Decode request body
+	var triggerReq struct {
+		ActionID   string            `json:"action_id"`
+		Parameters map[string]string `json:"parameters"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields() // Prevent unexpected fields
+	err := decoder.Decode(&triggerReq)
+	if err != nil {
+		log.Error("Failed to decode trigger request body", "error", err)
+		http.Error(w, fmt.Sprintf("Bad Request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if triggerReq.ActionID == "" {
+		http.Error(w, "Bad Request: missing action_id", http.StatusBadRequest)
+		return
+	}
+
+	// Validate action ID exists? (Optional, processor will handle it anyway)
+
+	// Create and enqueue event
+	event := models.Event{
+		// ID generated by Enqueue
+		SourceID:   "cli_trigger", // Or maybe pass client info?
+		Type:       models.EventTypeManual,
+		ActionID:   triggerReq.ActionID,
+		Timestamp:  time.Now().UTC(),
+		Parameters: triggerReq.Parameters,
+	}
+
+	if err := s.eventQueue.Enqueue(event); err != nil {
+		log.Error("Failed to enqueue triggered event", "error", err, "action_id", triggerReq.ActionID)
+		http.Error(w, "Internal Server Error: Failed to enqueue event", http.StatusInternalServerError)
+		return
+	}
+
+	log.Info("Successfully enqueued triggered event", "action_id", triggerReq.ActionID)
+	w.WriteHeader(http.StatusAccepted)
+	fmt.Fprintf(w, "Event for action '%s' enqueued successfully.\n", triggerReq.ActionID)
+}

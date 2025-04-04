@@ -1,0 +1,34 @@
+application:
+  log_level: "debug" # Use debug for testing
+  log_format: "text"
+  default_retry:
+    max_retries: 2
+    delay: 0.5 # seconds
+    backoff_factor: 1.5
+  max_concurrency: 5
+  queue_persist_path: "lex_queue.json"
+  pid_file_path: "lex.pid"
+
+listeners: [] # No listeners for this basic test
+
+watchers: [] # No watchers for this basic test
+
+timers:
+  - id: "simple_timer"
+    description: "A simple timer that runs every 10 seconds"
+    action: "echo_action"
+    interval: "10s" # Run every 10 seconds
+    # Parameters are defined on the action now
+
+actions:
+  - id: "echo_action"
+    description: "Simple action that echoes a message"
+    script: |
+      #!/bin/sh
+      echo "Event from {{event_source_type}} '{{event_source_id}}' triggered action '{{event_action_id}}' at $(date)" > /tmp/message.txt
+      echo "Parameter test: {{message}}" >> /tmp/message.txt
+    parameters:
+      - name: "message"
+        type: "string"
+        default: "Hello from Lex Timer!" # Default value for the parameter
+        description: "A message to echo when the timer triggers"

@@ -10,15 +10,19 @@ import (
 
 	// Needed for config access
 	"github.com/pbaity/lex/internal/logger"
-	"github.com/pbaity/lex/internal/queue" // Needed for trigger endpoint
 	"github.com/pbaity/lex/pkg/models"
 	// "github.com/pbaity/lex/internal/behavior/listener" // Will be needed later
 )
 
+// Queue defines the interface required for enqueuing events.
+type Queue interface {
+	Enqueue(event models.Event) error
+}
+
 // HTTPServer manages the shared HTTP server for listeners and IPC.
 type HTTPServer struct {
 	config     *models.Config
-	eventQueue *queue.EventQueue
+	eventQueue Queue // Use interface
 	// configReloader func() error // Callback to trigger config reload
 	server *http.Server
 	mux    *http.ServeMux
@@ -26,7 +30,7 @@ type HTTPServer struct {
 }
 
 // NewHTTPServer creates a new shared HTTP server instance.
-func NewHTTPServer(cfg *models.Config, eq *queue.EventQueue /*, reloader func() error*/) *HTTPServer {
+func NewHTTPServer(cfg *models.Config, eq Queue /*, reloader func() error*/) *HTTPServer { // Accept interface
 	mux := http.NewServeMux()
 	// TODO: Make address configurable via cfg.Application settings
 	addr := ":8080"
@@ -35,7 +39,7 @@ func NewHTTPServer(cfg *models.Config, eq *queue.EventQueue /*, reloader func() 
 
 	srv := &HTTPServer{
 		config:     cfg,
-		eventQueue: eq,
+		eventQueue: eq, // Store interface
 		// configReloader: reloader,
 		mux: mux,
 		server: &http.Server{
@@ -114,8 +118,8 @@ func (s *HTTPServer) handleReload(w http.ResponseWriter, r *http.Request) {
 	//    - This is complex!
 
 	// Placeholder response
+	w.WriteHeader(http.StatusAccepted) // Set status code first
 	fmt.Fprintln(w, "Reload request received (implementation pending).")
-	w.WriteHeader(http.StatusAccepted)
 }
 
 // handleTrigger handles requests to the /lex/trigger endpoint.

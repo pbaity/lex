@@ -6,24 +6,28 @@ import (
 	"time"
 
 	"github.com/pbaity/lex/internal/logger"
-	"github.com/pbaity/lex/internal/queue"
 	"github.com/pbaity/lex/pkg/models"
 )
+
+// Queue defines the interface required for enqueuing events.
+type Queue interface {
+	Enqueue(event models.Event) error
+}
 
 // TimerService manages the execution of configured timers.
 type TimerService struct {
 	config      *models.Config
-	eventQueue  *queue.EventQueue
+	eventQueue  Queue // Use the interface type
 	wg          sync.WaitGroup
 	cancelFuncs map[string]context.CancelFunc // Map timer ID to its context cancel func
 	mu          sync.Mutex                    // Protects cancelFuncs map
 }
 
 // NewService creates a new TimerService.
-func NewService(cfg *models.Config, eq *queue.EventQueue) *TimerService {
+func NewService(cfg *models.Config, eq Queue) *TimerService { // Accept interface
 	return &TimerService{
 		config:      cfg,
-		eventQueue:  eq,
+		eventQueue:  eq, // Store interface
 		cancelFuncs: make(map[string]context.CancelFunc),
 	}
 }

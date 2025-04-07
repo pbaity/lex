@@ -8,25 +8,30 @@ import (
 	"time"
 
 	"github.com/pbaity/lex/internal/logger"
-	"github.com/pbaity/lex/internal/queue"
 	"github.com/pbaity/lex/pkg/models"
 	"golang.org/x/time/rate"
 )
 
+// Queue defines the interface required for enqueuing events.
+// This allows decoupling the listener service from the concrete queue implementation.
+type Queue interface {
+	Enqueue(event models.Event) error
+}
+
 // ListenerService manages the registration of listener handlers.
 type ListenerService struct {
 	config       *models.Config
-	eventQueue   *queue.EventQueue
+	eventQueue   Queue          // Use the interface type
 	mux          *http.ServeMux // Use the mux passed in
 	rateLimiters map[string]*rate.Limiter
 	// wg and server fields removed - lifecycle managed externally
 }
 
 // NewService creates a new ListenerService, using the provided shared mux.
-func NewService(cfg *models.Config, eq *queue.EventQueue, mux *http.ServeMux) *ListenerService {
+func NewService(cfg *models.Config, eq Queue, mux *http.ServeMux) *ListenerService { // Accept interface
 	return &ListenerService{
 		config:       cfg,
-		eventQueue:   eq,
+		eventQueue:   eq,  // Store interface
 		mux:          mux, // Use the provided mux
 		rateLimiters: make(map[string]*rate.Limiter),
 	}

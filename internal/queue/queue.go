@@ -43,6 +43,16 @@ func (eq *EventQueue) Enqueue(event models.Event) error {
 	if event.ID == "" {
 		event.ID = uuid.NewString() // Generate unique ID
 	}
+
+	// Check if the queue is already stopped before attempting to enqueue
+	select {
+	case <-eq.stopChan:
+		return fmt.Errorf("event queue is stopped, cannot enqueue event %s", event.ID)
+	default:
+		// Queue is not stopped yet, proceed with the enqueue attempt
+	}
+
+	// Attempt to enqueue the event
 	select {
 	case eq.queue <- event:
 		logger.L().Debug("Event enqueued", "event_id", event.ID, "action_id", event.ActionID, "source_id", event.SourceID)
@@ -58,18 +68,27 @@ func (eq *EventQueue) Enqueue(event models.Event) error {
 // It blocks until an event is available or the context is cancelled.
 func (eq *EventQueue) Dequeue(ctx context.Context) (models.Event, error) {
 	select {
-	case event := <-eq.queue:
+	case event, ok := <-eq.queue: // Read with ok check first
+		if !ok { // Channel closed normally (implies Stop was called and finished)
+			return models.Event{}, fmt.Errorf("event queue stopped")
+		}
 		logger.L().Debug("Event dequeued", "event_id", event.ID)
 		return event, nil
 	case <-ctx.Done():
 		return models.Event{}, ctx.Err()
 	case <-eq.stopChan:
-		// Check if there are still items after stop signal but before channel close
+		// Stop signal received. Attempt one last non-blocking read in case
+		// items were enqueued before stopChan was closed but after the main select started.
+		// Also handles the case where Stop() is draining the queue.
 		select {
-		case event := <-eq.queue:
+		case event, ok := <-eq.queue:
+			if !ok { // Channel is closed and empty
+				return models.Event{}, fmt.Errorf("event queue stopped")
+			}
+			// Successfully dequeued an item during shutdown
 			logger.L().Debug("Event dequeued after stop signal", "event_id", event.ID)
 			return event, nil
-		default:
+		default: // Queue buffer is empty, and stop signal is active
 			return models.Event{}, fmt.Errorf("event queue stopped")
 		}
 	}

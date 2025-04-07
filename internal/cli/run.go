@@ -37,7 +37,12 @@ func runForeground(configPath string) {
 	// --- Logger Initialization ---
 	// Logger might be initialized before this if needed by stop/start,
 	// but it's safe to re-init or check if already initialized.
-	logger.Init(cfg.Application)
+	if err := logger.Init(cfg.Application, nil); err != nil { // Pass nil writer and handle error
+		// Use fmt for critical startup errors before logger is confirmed usable
+		fmt.Fprintf(os.Stderr, "Error initializing logger: %v\n", err)
+		// Optionally exit, or continue with default logger if L() handles it
+		os.Exit(1)
+	}
 	log := logger.L()
 	log.Info("Lex application running in foreground...")
 

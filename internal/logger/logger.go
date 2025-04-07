@@ -1,6 +1,9 @@
 package logger
 
 import (
+	// Add errors import
+	"fmt" // Add fmt import
+	"io"  // Add io import
 	"log/slog"
 	"os"
 	"strings"
@@ -10,21 +13,24 @@ import (
 
 var globalLogger *slog.Logger
 
-// Init initializes the global logger based on application settings.
-// It should be called once during application startup.
-func Init(settings models.ApplicationSettings) {
+// Init initializes the global logger based on application settings and an output writer.
+// If writer is nil, os.Stdout is used.
+// It should be called once during application startup. Returns an error on invalid settings.
+func Init(settings models.ApplicationSettings, writer io.Writer) error {
 	var level slog.Level
-	switch strings.ToLower(settings.LogLevel) {
+	logLevelLower := strings.ToLower(settings.LogLevel)
+	switch logLevelLower {
 	case "debug":
 		level = slog.LevelDebug
-	case "info":
+	case "info", "": // Default to Info level if empty
 		level = slog.LevelInfo
 	case "warn":
 		level = slog.LevelWarn
 	case "error":
 		level = slog.LevelError
 	default:
-		level = slog.LevelInfo // Default to Info level
+		// Return error for invalid level
+		return fmt.Errorf("invalid log level specified: %s", settings.LogLevel)
 	}
 
 	opts := &slog.HandlerOptions{
@@ -32,19 +38,28 @@ func Init(settings models.ApplicationSettings) {
 		// AddSource: true, // Uncomment to include source file and line number
 	}
 
+	// Default to os.Stdout if writer is nil
+	if writer == nil {
+		writer = os.Stdout
+	}
+
 	var handler slog.Handler
-	switch strings.ToLower(settings.LogFormat) {
+	logFormatLower := strings.ToLower(settings.LogFormat)
+	switch logFormatLower {
 	case "json":
-		handler = slog.NewJSONHandler(os.Stdout, opts)
-	case "text":
-		fallthrough // Fallthrough to default text handler
+		handler = slog.NewJSONHandler(writer, opts)
+	case "text", "": // Default to text format if empty
+		handler = slog.NewTextHandler(writer, opts)
 	default:
-		handler = slog.NewTextHandler(os.Stdout, opts)
+		// Return error for invalid format
+		return fmt.Errorf("invalid log format specified: %s", settings.LogFormat)
 	}
 
 	globalLogger = slog.New(handler)
 	slog.SetDefault(globalLogger) // Set as default for convenience
-	globalLogger.Info("Logger initialized", "level", level.String(), "format", settings.LogFormat)
+	globalLogger.Info("Logger initialized", "level", level.String(), "format", logFormatLower)
+
+	return nil // Success
 }
 
 // L returns the initialized global logger instance.

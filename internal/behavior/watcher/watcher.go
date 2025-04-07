@@ -6,29 +6,37 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pbaity/lex/internal/action"
 	"github.com/pbaity/lex/internal/logger"
-	"github.com/pbaity/lex/internal/queue"
 	"github.com/pbaity/lex/internal/retry"
 	"github.com/pbaity/lex/pkg/models"
 )
 
+// Queue defines the interface required for enqueuing events.
+type Queue interface {
+	Enqueue(event models.Event) error
+}
+
+// Executor defines the interface required for executing actions (watcher scripts).
+type Executor interface {
+	Execute(ctx context.Context, event models.Event, actionCfg models.ActionConfig) (stdout, stderr string, err error)
+}
+
 // WatcherService manages the execution of configured watchers.
 type WatcherService struct {
 	config         *models.Config
-	eventQueue     *queue.EventQueue
-	actionExecutor *action.Executor
+	eventQueue     Queue    // Use interface
+	actionExecutor Executor // Use interface
 	wg             sync.WaitGroup
 	cancelFuncs    map[string]context.CancelFunc // Map watcher ID to its context cancel func
 	mu             sync.Mutex                    // Protects cancelFuncs map
 }
 
 // NewService creates a new WatcherService.
-func NewService(cfg *models.Config, eq *queue.EventQueue, exec *action.Executor) *WatcherService {
+func NewService(cfg *models.Config, eq Queue, exec Executor) *WatcherService { // Accept interfaces
 	return &WatcherService{
 		config:         cfg,
-		eventQueue:     eq,
-		actionExecutor: exec,
+		eventQueue:     eq,   // Store interface
+		actionExecutor: exec, // Store interface
 		cancelFuncs:    make(map[string]context.CancelFunc),
 	}
 }

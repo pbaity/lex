@@ -8,11 +8,18 @@ import (
 	"github.com/pbaity/lex/pkg/models"
 )
 
-// DefaultRetryPolicy provides sensible defaults if no policy is specified.
+// Default retry constants
+const (
+	DefaultMaxRetries    = 10
+	DefaultDelaySeconds  = 1.0
+	DefaultBackoffFactor = 2.0
+)
+
+// DefaultRetryPolicy provides sensible defaults if no policy is specified, using the constants.
 var DefaultRetryPolicy = models.RetryPolicy{
-	MaxRetries:    intPtr(3),
-	Delay:         float64Ptr(1.0), // 1 second
-	BackoffFactor: float64Ptr(2.0), // Exponential backoff
+	MaxRetries:    intPtr(DefaultMaxRetries),
+	Delay:         float64Ptr(DefaultDelaySeconds),
+	BackoffFactor: float64Ptr(DefaultBackoffFactor),
 }
 
 // Operation is a function that performs an action and returns an error if it fails.
@@ -21,6 +28,12 @@ type Operation func(ctx context.Context) error
 // Do executes the provided operation, retrying according to the policy if it fails.
 // It merges the provided policy with the default policy for missing values.
 func Do(ctx context.Context, operationName string, policy *models.RetryPolicy, op Operation) error {
+	// Check context before doing anything else
+	if err := ctx.Err(); err != nil {
+		logger.L().Warn("Operation cancelled before first attempt due to context error", "operation", operationName, "error", err)
+		return err // Return context error immediately
+	}
+
 	effectivePolicy := MergePolicies(policy, &DefaultRetryPolicy) // Use exported name
 	l := logger.L().With("operation", operationName)
 
@@ -71,36 +84,72 @@ func Do(ctx context.Context, operationName string, policy *models.RetryPolicy, o
 
 // MergePolicies combines a specific policy with a default policy.
 // Specific values override defaults. Pointers are used to detect unset fields.
-func MergePolicies(specific, defaultPolicy *models.RetryPolicy) *models.RetryPolicy {
+// Uses defined constants for defaults if policies or fields are nil.
+func MergePolicies(specific, defaultP *models.RetryPolicy) *models.RetryPolicy {
+	// Use the exported DefaultRetryPolicy as the base for defaults if defaultP is nil
+	if defaultP == nil {
+		// Return a copy of the package-level DefaultRetryPolicy
+		// This already uses the constants.
+		dpCopy := DefaultRetryPolicy
+		defaultP = &dpCopy
+	}
+
+	// Handle nil specific policy - return a copy of the (potentially adjusted) default
+	if specific == nil {
+		dpCopy := *defaultP
+		// Ensure the copy has defaults applied if the provided default was incomplete
+		if dpCopy.MaxRetries == nil {
+			dpCopy.MaxRetries = intPtr(DefaultMaxRetries)
+		}
+		if dpCopy.Delay == nil {
+			dpCopy.Delay = float64Ptr(DefaultDelaySeconds)
+		}
+		if dpCopy.BackoffFactor == nil {
+			dpCopy.BackoffFactor = float64Ptr(DefaultBackoffFactor)
+		}
+		return &dpCopy
+	}
+
+	// Both specific and defaultP are non-nil (or defaultP was set to DefaultRetryPolicy)
 	merged := &models.RetryPolicy{}
 
-	if specific != nil && specific.MaxRetries != nil {
+	// Merge MaxRetries
+	if specific.MaxRetries != nil {
 		merged.MaxRetries = specific.MaxRetries
+	} else if defaultP.MaxRetries != nil {
+		merged.MaxRetries = defaultP.MaxRetries
 	} else {
-		merged.MaxRetries = defaultPolicy.MaxRetries
+		merged.MaxRetries = intPtr(DefaultMaxRetries) // Fallback to constant
 	}
 
-	if specific != nil && specific.Delay != nil {
+	// Merge Delay
+	if specific.Delay != nil {
 		merged.Delay = specific.Delay
+	} else if defaultP.Delay != nil {
+		merged.Delay = defaultP.Delay
 	} else {
-		merged.Delay = defaultPolicy.Delay
+		merged.Delay = float64Ptr(DefaultDelaySeconds) // Fallback to constant
 	}
 
-	if specific != nil && specific.BackoffFactor != nil {
+	// Merge BackoffFactor
+	if specific.BackoffFactor != nil {
 		merged.BackoffFactor = specific.BackoffFactor
+	} else if defaultP.BackoffFactor != nil {
+		merged.BackoffFactor = defaultP.BackoffFactor
 	} else {
-		merged.BackoffFactor = defaultPolicy.BackoffFactor
+		merged.BackoffFactor = float64Ptr(DefaultBackoffFactor) // Fallback to constant
 	}
 
-	// Ensure non-nil pointers for easier use later, defaulting missing values
+	// Final check: Ensure non-nil pointers using constants as final defaults
+	// (Should be redundant given the logic above, but safe)
 	if merged.MaxRetries == nil {
-		merged.MaxRetries = intPtr(0) // Default to 0 retries if somehow still nil
+		merged.MaxRetries = intPtr(DefaultMaxRetries)
 	}
 	if merged.Delay == nil {
-		merged.Delay = float64Ptr(0.0) // Default to 0 delay
+		merged.Delay = float64Ptr(DefaultDelaySeconds)
 	}
 	if merged.BackoffFactor == nil {
-		merged.BackoffFactor = float64Ptr(1.0) // Default to no backoff
+		merged.BackoffFactor = float64Ptr(DefaultBackoffFactor)
 	}
 
 	return merged

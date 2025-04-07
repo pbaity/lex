@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -87,12 +88,15 @@ func (e *Executor) Execute(ctx context.Context, event models.Event, actionCfg mo
 		return "", "", fmt.Errorf("parameter substitution failed: %w", err)
 	}
 
-	// 3. Determine execution method (inline script vs. external file/command)
-	var cmd *exec.Cmd
-	isInlineScript := strings.ContainsAny(scriptContent, "\n\r") || !isLikelyFilePathOrCommand(scriptContent)
+	l.Debug("Command string after substitution", "command", scriptContent) // Log substituted command string
 
-	if isInlineScript {
-		// Create a temporary script file for inline scripts
+	// 3. Determine execution method based on *original* script content
+	var cmd *exec.Cmd
+	isOriginalInline := strings.ContainsAny(actionCfg.Script, "\n\r") // Check original script for newlines
+
+	if isOriginalInline {
+		l.Debug("Executing as inline script (via temp file)")
+		// Create a temporary script file for the *substituted* inline script
 		tmpFile, err := os.CreateTemp("", fmt.Sprintf("lex_action_%s_*.sh", actionCfg.ID))
 		if err != nil {
 			l.Error("Failed to create temporary script file", "error", err)
@@ -100,14 +104,12 @@ func (e *Executor) Execute(ctx context.Context, event models.Event, actionCfg mo
 		}
 		defer os.Remove(tmpFile.Name()) // Clean up the temp file
 
-		// Write script content to the temp file
-		// Add shebang if not present? Assume bash/sh for now.
-		if !strings.HasPrefix(scriptContent, "#!") {
-			scriptContent = "#!/bin/sh\n" + scriptContent // Default to sh
-		}
+		// Write the *substituted* script content to the temp file
+		// No need to add shebang here, as we'll execute the temp file directly.
+		// The OS will use the shebang if present in the original (and thus substituted) content.
 		if _, err := tmpFile.WriteString(scriptContent); err != nil {
-			l.Error("Failed to write to temporary script file", "error", err)
-			tmpFile.Close()
+			l.Error("Failed to write substituted content to temporary script file", "error", err)
+			tmpFile.Close() // Close before removing
 			return "", "", fmt.Errorf("failed to write temp script: %w", err)
 		}
 		tmpFile.Close() // Close the file so it can be executed
@@ -118,26 +120,20 @@ func (e *Executor) Execute(ctx context.Context, event models.Event, actionCfg mo
 			return "", "", fmt.Errorf("failed to chmod temp script: %w", err)
 		}
 
-		l.Debug("Executing inline script via temporary file", "temp_file", tmpFile.Name())
-		cmd = exec.CommandContext(ctx, tmpFile.Name())
+		l.Debug("Executing inline script via temporary file using sh", "temp_file", tmpFile.Name())
+		// Explicitly use 'sh' to execute the temporary script for consistency
+		cmd = exec.CommandContext(ctx, "sh", tmpFile.Name())
 
 	} else {
-		// Treat scriptContent as a command or path to an executable
-		// Simple approach: split by space, first part is command, rest are args.
-		// This is naive and won't handle quoted arguments correctly.
-		// A more robust approach might involve shell interpretation or a library.
-		// For now, let's assume it's either a path or a simple command.
-		parts := strings.Fields(scriptContent)
-		if len(parts) == 0 {
-			return "", "", fmt.Errorf("script command is empty after substitution")
+		l.Debug("Executing as command/path via OS shell")
+		// Treat the *substituted* scriptContent as a command string to be executed by the shell.
+		// This handles arguments and potential quoting correctly after substitution.
+		if runtime.GOOS == "windows" {
+			cmd = exec.CommandContext(ctx, "cmd", "/C", scriptContent)
+		} else {
+			// Use 'sh -c' for POSIX shells
+			cmd = exec.CommandContext(ctx, "sh", "-c", scriptContent)
 		}
-		commandPath := parts[0]
-		args := parts[1:]
-
-		// If it looks like a relative path, maybe resolve it relative to a base dir?
-		// For now, rely on PATH or absolute paths.
-		l.Debug("Executing external command/script", "command", commandPath, "args", args)
-		cmd = exec.CommandContext(ctx, commandPath, args...)
 	}
 
 	// 4. Execute the command and capture output
@@ -146,9 +142,45 @@ func (e *Executor) Execute(ctx context.Context, event models.Event, actionCfg mo
 	cmd.Stderr = &stderrBuf
 
 	startTime := time.Now()
-	runErr := cmd.Run() // This blocks until the command finishes or ctx is cancelled
-	duration := time.Since(startTime)
+	// Use Start() and Wait() for better cancellation handling
+	if err := cmd.Start(); err != nil {
+		l.Error("Failed to start action command", "error", err)
+		return "", "", fmt.Errorf("failed to start command: %w", err)
+	}
 
+	// Goroutine to wait for context cancellation and kill the process
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	var runErr error
+	select {
+	case <-ctx.Done():
+		// Context was cancelled, attempt to kill the process
+		l.Warn("Context cancelled during action execution, attempting to kill process", "pid", cmd.Process.Pid)
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			l.Error("Failed to kill process after context cancellation", "pid", cmd.Process.Pid, "error", killErr)
+		} else {
+			l.Info("Process killed successfully due to context cancellation", "pid", cmd.Process.Pid)
+		}
+		// Wait for the cmd.Wait() goroutine to finish, capturing its error (likely "signal: killed")
+		runErr = <-done
+		// Ensure the error reflects the context cancellation
+		if runErr == nil {
+			runErr = ctx.Err() // If Wait() didn't error, use the context error
+		} else if !strings.Contains(runErr.Error(), "killed") {
+			// If Wait() errored but not due to being killed, wrap with context error
+			runErr = fmt.Errorf("%w (underlying error: %s)", ctx.Err(), runErr)
+		}
+		l.Warn("Action terminated due to context cancellation", "error", runErr)
+
+	case runErr = <-done:
+		// Command completed (successfully or with an error) before context cancellation
+		l.Debug("Command finished naturally")
+	}
+
+	duration := time.Since(startTime)
 	stdout = stdoutBuf.String()
 	stderr = stderrBuf.String()
 
@@ -191,6 +223,10 @@ func substitutePlaceholders(template string, params map[string]string) (string, 
 // isLikelyFilePathOrCommand checks if a string looks more like a path or command
 // rather than an inline script block. Very basic heuristic.
 func isLikelyFilePathOrCommand(s string) bool {
+	// Explicitly handle empty string as not a path/command
+	if s == "" {
+		return false
+	}
 	// If it contains directory separators or common executable extensions, likely a path/command.
 	return strings.ContainsAny(s, "/\\") ||
 		strings.HasSuffix(s, ".sh") ||

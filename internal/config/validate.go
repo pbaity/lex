@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors" // Add errors import
 	"fmt"
 	"net/url"
 	"os"
@@ -12,12 +13,21 @@ import (
 
 // ValidateConfig checks the entire configuration for logical consistency and required fields.
 func ValidateConfig(cfg *models.Config) error {
+	// Add nil check at the beginning
+	if cfg == nil {
+		return errors.New("config cannot be nil")
+	}
+
 	if err := validateApplicationSettings(&cfg.Application); err != nil {
 		return fmt.Errorf("invalid application settings: %w", err)
 	}
 
-	// Keep track of defined action IDs for validation
+	// Keep track of defined behavior and action IDs for validation
 	actionIDs := make(map[string]bool)
+	listenerIDs := make(map[string]bool)
+	watcherIDs := make(map[string]bool)
+	timerIDs := make(map[string]bool)
+
 	for i, action := range cfg.Actions {
 		if err := validateActionConfig(&action, i); err != nil {
 			return fmt.Errorf("invalid action config at index %d (ID: %s): %w", i, action.ID, err)
@@ -28,12 +38,18 @@ func ValidateConfig(cfg *models.Config) error {
 		actionIDs[action.ID] = true
 	}
 
-	// Keep track of listener paths to prevent duplicates
+	// Keep track of listener paths and IDs to prevent duplicates
 	listenerPaths := make(map[string]bool)
 	for i, listener := range cfg.Listeners {
 		if err := validateListenerConfig(&listener, i, actionIDs); err != nil {
 			return fmt.Errorf("invalid listener config at index %d (ID: %s): %w", i, listener.ID, err)
 		}
+		// Check for duplicate ID
+		if _, exists := listenerIDs[listener.ID]; exists {
+			return fmt.Errorf("duplicate listener ID found: %s", listener.ID)
+		}
+		listenerIDs[listener.ID] = true
+		// Check for duplicate path
 		if _, exists := listenerPaths[listener.Path]; exists {
 			return fmt.Errorf("duplicate listener path found: %s", listener.Path)
 		}
@@ -44,12 +60,22 @@ func ValidateConfig(cfg *models.Config) error {
 		if err := validateWatcherConfig(&watcher, i, actionIDs); err != nil {
 			return fmt.Errorf("invalid watcher config at index %d (ID: %s): %w", i, watcher.ID, err)
 		}
+		// Check for duplicate ID
+		if _, exists := watcherIDs[watcher.ID]; exists {
+			return fmt.Errorf("duplicate watcher ID found: %s", watcher.ID)
+		}
+		watcherIDs[watcher.ID] = true
 	}
 
 	for i, timer := range cfg.Timers {
 		if err := validateTimerConfig(&timer, i, actionIDs); err != nil {
 			return fmt.Errorf("invalid timer config at index %d (ID: %s): %w", i, timer.ID, err)
 		}
+		// Check for duplicate ID
+		if _, exists := timerIDs[timer.ID]; exists {
+			return fmt.Errorf("duplicate timer ID found: %s", timer.ID)
+		}
+		timerIDs[timer.ID] = true
 	}
 
 	// TODO: Add validation for merging default settings (e.g., ensure retry policies are valid)
